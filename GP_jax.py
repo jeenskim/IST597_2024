@@ -12,41 +12,17 @@ import tqdm
 import pickle
 from jax.nn import sigmoid
 
-class gp_evolution(flax.struct.PyTreeNode):
+class gp_evolution_ML(flax.struct.PyTreeNode):
     V : jnp.array
     U : jnp.array
     P : jnp.array
     num_steps : int
     model : nn.Module
     sampling_factor : int
-    
-    # '''
-    # Does a POD/POD-DEIM GP evolution
-    # '''
-    # #def __init__(self,V,U,P,ytilde_init,model):
-    #     '''
-    #     ytilde - initial condition in POD space - shape: Kx1
-    #     V - Truncated POD bases (precomputed) - shape: NxK
-    #     V - Truncated POD bases for nonlinear snapshots (precomputed) - shape: NxM
-    #     P - DEIM matrix - shape: NxM
-    #     '''
-        
-    #     # self.V = V
-    #     # self.U = U
-    #     # self.P = P
-    #     # self.num_steps = int(jnp.shape(tsteps)[0]-1)
-    #     # self.state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps+1),dtype='double')
-    #     # self.state_tracker = self.state_tracker.at[:, 0].set(ytilde_init[:, 0])
-    #     # self.nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps+1),dtype='double')
-    #     # self.model = model
+    train : bool
     
     def init_params(self):
         return self.model.init(jax.random.PRNGKey(0),jnp.zeros((128)))
-        
-        
-    def set_ML_sampling(self, sampling_factor):
-        k_index_tracker = jnp.zeros(shape=(int(jnp.shape(self.V)[0]/sampling_factor),self.num_steps+1),dtype='int')
-
         
 
     def linear_operator_fixed(self):
@@ -95,56 +71,18 @@ class gp_evolution(flax.struct.PyTreeNode):
         nonlinear_field_approx = nl_calc(field)
         return jnp.matmul(jnp.transpose(self.V),nonlinear_field_approx)
 
-    def pod_gp_rhs(self,state):
-        '''
-        Calculate the rhs of the POD GP implementation
-        '''
-        linear_term = self.linear_operator(state)
-        non_linear_term = self.nonlinear_operator_pod(state)
-    
-        return jnp.add(linear_term,-non_linear_term)
-
-    def pod_gp_evolve(self):
-        '''
-        Use RK3 to do a system evolution for pod_gp
-        '''
-        # Setup fixed operations
-        self.linear_operator_fixed()
-        state = jnp.copy(self.state_tracker[:,0])
-        
-        # Recording the nonlinear term
-        non_linear_term = self.nonlinear_operator_pod(state)
-        #self.nl_state_tracker[:,0] = non_linear_term[:,0]
-        self.nl_state_tracker=self.nl_state_tracker.at[:,0].set(non_linear_term[:,0])
-
-        for t in range(1,self.num_steps+1):
-            
-            rhs = self.pod_gp_rhs(state)
-            l1 = state + dt*rhs[:,0]
-
-            rhs = self.pod_gp_rhs(l1)
-            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
-
-            rhs = self.pod_gp_rhs(l2)
-            #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-            state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-
-            #self.state_tracker[:,t] = state[:]
-            self.state_tracker=self.state_tracker.at[:,t].set(state[:])
-            # Recording the nonlinear term
-            non_linear_term = self.nonlinear_operator_pod(state)
-            #self.nl_state_tracker[:,t] = non_linear_term[:,0]
-            self.nl_state_tracker=self.nl_state_tracker.at[:,t].set(non_linear_term[:,0])
-
     def deim_matrices_precompute(self):
         '''
         Precompute the DEIM matrices for nonlinear term in ODE
         '''
-        mtemp = jnp.linalg.pinv(jnp.matmul(jnp.transpose(self.P),self.U)) #ok MxM
-        mtemp = jnp.matmul(self.U,mtemp) # NxM
-        mtemp = jnp.matmul(mtemp,jnp.transpose(self.P)) # NxN
+        # np.save('P.npy',self.P)
+        mtemp = np.linalg.pinv(np.matmul(np.transpose(self.P),self.U)) #ok MxM
+        mtemp = np.matmul(self.U,mtemp) # NxM
+        mtemp = np.matmul(mtemp,np.transpose(self.P)) # NxN
         
-        self.varP = jnp.matmul(jnp.transpose(self.V),mtemp) # KxN
+        varP = np.matmul(np.transpose(self.V),mtemp) # KxN
+        
+        return varP
         
     def deim_matrices_MLsampling(self, ytilde, params):
         '''
@@ -162,7 +100,7 @@ class gp_evolution(flax.struct.PyTreeNode):
         field = jnp.matmul(self.V, ytilde).reshape(N_,1)
         
         # Numer of sampling point    
-        k_sampling=int(N_/self.sampling_factor)
+        #k_sampling=int(N_/self.sampling_factor)
         
         #calculate characteristic variable field using MLP
         #print(field.shape)
@@ -170,11 +108,40 @@ class gp_evolution(flax.struct.PyTreeNode):
         # k_index=self.model.apply(params, field[:,0])
         # print(k_index.shape)
         
+        
         P_ML = self.model.apply(params, field[:,0])
+        # jax.debug.print("{}",P_ML.shape)
         
-        # k_index = jnp.argsort(y, descending=True)[:k_sampling]
         
-        k_index = jnp.ones((12))
+        
+        
+        k_index = jnp.argmax(P_ML, axis=0)
+        
+        if self.train == False:
+        
+            result = np.zeros_like(P_ML)
+            max_indices = np.argmax(P_ML, axis=0)
+            result[max_indices, np.arange(P_ML.shape[1])] = 1
+            P_ML = result
+            k_index = jnp.argmax(P_ML, axis=0)          
+            
+            # P_ML=self.P
+            
+            
+        
+        
+        # P_ML=self.P
+        
+        # np.save('P_ML.npy',P_ML)
+        #exit()
+        
+                    
+        #print(jnp.average(P_ML, axis=0))
+        
+        #jax.debug.print("{}",P_ML[:,0])
+        #P_ML = jax.where()
+
+        # print(k_index)
         #y_minus=jnp.array(-y, dtype=np.float64)
         #print(y)
         # print(k_index.shape)
@@ -202,9 +169,11 @@ class gp_evolution(flax.struct.PyTreeNode):
         mtemp = jnp.matmul(self.U,mtemp) # NxM
         mtemp = jnp.matmul(mtemp,jnp.transpose(P_ML)) # NxN
         
+        
         varP = jnp.matmul(jnp.transpose(self.V),mtemp) # KxN
         
- 
+        
+        
         
         return k_index, varP
           
@@ -218,15 +187,6 @@ class gp_evolution(flax.struct.PyTreeNode):
         nonlinear_field_approx = nl_calc(field)
         return jnp.matmul(varP,nonlinear_field_approx)
 
-    def pod_deim_rhs(self,state):
-        '''
-        Calculate the rhs of the POD GP implementation
-        '''
-        linear_term = self.linear_operator(state)
-        non_linear_term = self.nonlinear_operator_pod_deim(state)
-    
-        return jnp.add(linear_term,-non_linear_term)
-    
     
     def pod_deim_rhs_MLsampling(self,state, linear_matrix, varP):
         '''
@@ -238,96 +198,6 @@ class gp_evolution(flax.struct.PyTreeNode):
         return jnp.add(linear_term,-non_linear_term)
         
 
-    def pod_deim_evolve(self):
-        '''
-        Use RK3 to do a system evolution for pod_deim
-        '''
-        # Setup fixed operations
-        self.linear_operator_fixed()
-        self.deim_matrices_precompute()
-        state = jnp.copy(self.state_tracker[:,0])
-        
-        # Recording the nonlinear term
-        non_linear_term = self.nonlinear_operator_pod_deim(state)
-        #self.nl_state_tracker[:,0] = non_linear_term[:,0]
-        nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
-        
-        
-        for t in range(1,self.num_steps+1):
-            
-            rhs = self.pod_deim_rhs(state)
-            l1 = state + dt*rhs[:,0]
-
-            rhs = self.pod_deim_rhs(l1)
-            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
-
-            rhs = self.pod_deim_rhs(l2)
-            #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-            state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-            
-            #self.state_tracker[:,t] = state[:]
-            state_tracker=state_tracker.at[:,t].set(state[:])
-            # Recording the nonlinear term
-            non_linear_term = self.nonlinear_operator_pod_deim(state)
-            #self.nl_state_tracker[:,t] = non_linear_term[:,0]
-            nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
-
-    # def slfn_gp_evolve(self,model):
-    #     '''
-    #     Use Euler forward to do a system evolution for slfn_gp
-    #     '''
-    #     # Setup fixed operations
-    #     self.linear_operator_fixed()
-    #     self.deim_matrices_precompute()
-    #     state = jnp.copy(self.state_tracker[:,0])
-    #     N_ = jnp.shape(state)[0]
-    #     non_linear_term = self.nonlinear_operator_pod_deim(state)
-    #     for t in range(1,self.num_steps+1):
-            
-    #         linear_term = self.linear_operator(state)
-    #         non_linear_term = jnp.transpose(model.predict(non_linear_term.reshape(1,N_)))
-    #         rhs = jnp.add(linear_term,-non_linear_term.reshape(N_,1))
-    #         state[:] = state[:] + dt*rhs[:,0]
-
-    #         self.state_tracker[:,t] = state[:]
-
-    # def lstm_gp_evolve(self,model):
-    #     '''
-    #     Use Euler forward to do a system evolution for slfn_gp
-    #     '''
-    #     # Setup fixed operations
-    #     state = jnp.copy(self.state_tracker[:,0])
-    #     self.state_tracker[:,1:] = 0.0
-    #     self.linear_operator_fixed()
-    #     self.deim_matrices_precompute()
-    #     N_ = jnp.shape(state)[0]
-    #     non_linear_term_input = jnp.zeros(shape=(1,seq_num,N_))
-
-    #     for t in range(0,seq_num):
-    #         rhs = self.pod_deim_rhs(state)
-    #         l1 = state + dt*rhs[:,0]
-
-    #         rhs = self.pod_deim_rhs(l1)
-    #         l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
-
-    #         rhs = self.pod_deim_rhs(l2)
-    #         state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-    #         self.state_tracker[:,t] = state[:]
-
-    #         non_linear_term_input[0,t,:] = self.nonlinear_operator_pod_deim(state)[:,0]
-       
-    #     for t in range(seq_num,self.num_steps+1):
-    #         linear_term = self.linear_operator(state)
-    #         non_linear_term_next = jnp.transpose(model.predict(non_linear_term_input))
-
-    #         rhs = jnp.add(linear_term,-non_linear_term_next.reshape(N_,1))
-            
-    #         state[:] = state[:] + dt*rhs[:,0]
-    #         self.state_tracker[:,t] = state[:]
-
-    #         non_linear_term_input[0,:-1,:] = non_linear_term_input[0,1:,:]
-    #         non_linear_term_input[0,-1,:] = non_linear_term_next[:,0]
-
     def pod_deim_ML_evolve(self, params, ytilde_init):
         '''
         Use RK3 to do a system evolution for pod_deim
@@ -336,7 +206,7 @@ class gp_evolution(flax.struct.PyTreeNode):
         state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
         state_tracker = state_tracker.at[:, 0].set(ytilde_init)
         nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
-        k_index_tracker = jnp.zeros(shape=(int(jnp.shape(self.V)[0]/self.sampling_factor),self.num_steps),dtype='int')
+        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),self.num_steps),dtype='int')
         #k_index_tracker = jnp.zeros(shape=(128,self.num_steps),dtype='int')
         
 
@@ -377,9 +247,230 @@ class gp_evolution(flax.struct.PyTreeNode):
             
             k_index_tracker=k_index_tracker.at[:,t].set(k_index)
             
-        return state_tracker
+        return state_tracker, k_index_tracker
+    
+    
+    
+    def pod_deim_ML_evolve_fixed(self, params, ytilde_init):
+        '''
+        Use RK3 to do a system evolution for pod_deim
+        '''
+        
+        state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
+        state_tracker = state_tracker.at[:, 0].set(ytilde_init)
+        nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
+        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),self.num_steps),dtype='int')
+        #k_index_tracker = jnp.zeros(shape=(128,self.num_steps),dtype='int')
+        
+
+        # Setup fixed operations
+        linear_matrix = self.linear_operator_fixed()
+        self.deim_matrices_precompute()
+        state = state_tracker[:,0]
+        
+        k_index, varP = self.deim_matrices_MLsampling(state, params)
+        # Recording the nonlinear term
+        non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
+        #self.nl_state_tracker[:,0] = non_linear_term[:,0]
+        nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
+        k_index_tracker=k_index_tracker.at[:,0].set(k_index)
+        
+        
+        for t in range(1,self.num_steps+1):
+            rhs = self.pod_deim_rhs_MLsampling(state, linear_matrix, varP)
+            l1 = state + dt*rhs[:,0]
+
+            k_index, varP = self.deim_matrices_MLsampling(l1, params)
+            rhs = self.pod_deim_rhs_MLsampling(l1, linear_matrix, varP)
+            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
+
+            k_index, varP = self.deim_matrices_MLsampling(l2, params)
+            rhs = self.pod_deim_rhs_MLsampling(l2, linear_matrix, varP)
+            #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+            state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+
+            state_tracker=state_tracker.at[:,t].set(state[:])
+            
+
+            # Recording the nonlinear term
+            k_index, varP = self.deim_matrices_MLsampling(state, params)
+            #print(k_index)
+            
+            non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
+            nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
+            
+            k_index_tracker=k_index_tracker.at[:,t].set(k_index)
+            
+        return state_tracker, k_index_tracker
             
             
+
+
+class gp_evolution():
+    '''
+    Does a POD/POD-DEIM GP evolution
+    '''
+    def __init__(self,V,U,P,ytilde_init):
+        '''
+        ytilde - initial condition in POD space - shape: Kx1
+        V - Truncated POD bases (precomputed) - shape: NxK
+        V - Truncated POD bases for nonlinear snapshots (precomputed) - shape: NxM
+        P - DEIM matrix - shape: NxM
+        '''
+        self.V = V
+        self.U = U
+        self.P = P
+        self.num_steps = int(np.shape(tsteps)[0]-1)
+        self.state_tracker = np.zeros(shape=(np.shape(ytilde_init)[0],self.num_steps+1),dtype='double')
+        self.state_tracker[:,0] = ytilde_init[:,0]
+        self.nl_state_tracker = np.zeros(shape=(np.shape(ytilde_init)[0],self.num_steps+1),dtype='double')
+
+    def linear_operator_fixed(self):
+        '''
+        This method fixes the laplacian based linear operator
+        '''
+        N_ = np.shape(self.V)[0]
+        self.laplacian_matrix = -2.0*np.identity(N_)
+
+        # Setting upper diagonal
+        i_range = np.arange(0,N_-1,dtype='int')
+        j_range = np.arange(1,N_,dtype='int')
+
+        self.laplacian_matrix[i_range,j_range] = 1.0
+
+        # Setting lower diagonal
+        i_range = np.arange(1,N_,dtype='int')
+        j_range = np.arange(0,N_-1,dtype='int')
+
+        self.laplacian_matrix[i_range,j_range] = 1.0
+
+        # Periodicity
+        self.laplacian_matrix[0,N_-1] = 1.0
+        self.laplacian_matrix[N_-1,0] = 1.0
+        self.laplacian_matrix = 1.0/(Rnum*dx*dx)*self.laplacian_matrix
+        
+        # Final Linear operator
+        self.linear_matrix = np.matmul(np.matmul(np.transpose(self.V),self.laplacian_matrix),self.V)
+
+    def linear_operator(self,Ytilde):
+        '''
+        Calculates the linear term on the RHS
+        '''
+        M_ = np.shape(self.V)[1]
+        return np.matmul(self.linear_matrix,Ytilde).reshape(M_,1)
+
+    def nonlinear_operator_pod(self,ytilde):
+        '''
+        Defines the nonlinear reconstruction using the standard POD-GP technique
+        '''
+        N_ = np.shape(self.V)[0]
+        field = np.matmul(self.V,ytilde).reshape(N_,1)
+        nonlinear_field_approx = nl_calc(field)
+        return np.matmul(np.transpose(self.V),nonlinear_field_approx)
+
+    def pod_gp_rhs(self,state):
+        '''
+        Calculate the rhs of the POD GP implementation
+        '''
+        linear_term = self.linear_operator(state)
+        non_linear_term = self.nonlinear_operator_pod(state)
+    
+        return np.add(linear_term,-non_linear_term)
+
+    def pod_gp_evolve(self):
+        '''
+        Use RK3 to do a system evolution for pod_gp
+        '''
+        # Setup fixed operations
+        self.linear_operator_fixed()
+        state = np.copy(self.state_tracker[:,0])
+        
+        # Recording the nonlinear term
+        non_linear_term = self.nonlinear_operator_pod(state)
+        self.nl_state_tracker[:,0] = non_linear_term[:,0]
+
+        for t in range(1,self.num_steps+1):
+            
+            rhs = self.pod_gp_rhs(state)
+            l1 = state + dt*rhs[:,0]
+
+            rhs = self.pod_gp_rhs(l1)
+            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
+
+            rhs = self.pod_gp_rhs(l2)
+            state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+
+            self.state_tracker[:,t] = state[:]
+
+            # Recording the nonlinear term
+            non_linear_term = self.nonlinear_operator_pod(state)
+            self.nl_state_tracker[:,t] = non_linear_term[:,0]
+
+    def deim_matrices_precompute(self):
+        '''
+        Precompute the DEIM matrices for nonlinear term in ODE
+        '''
+        mtemp = np.linalg.pinv(np.matmul(np.transpose(self.P),self.U)) #ok MxM
+        mtemp = np.matmul(self.U,mtemp) # NxM
+        mtemp = np.matmul(mtemp,np.transpose(self.P)) # NxN
+        
+        self.varP = np.matmul(np.transpose(self.V),mtemp) # KxN
+
+    def nonlinear_operator_pod_deim(self,ytilde):
+        '''
+        Defines the nonlinear reconstruction using the POD-DEIM technique
+        '''
+        N_ = np.shape(self.V)[0]
+        field = np.matmul(self.V,ytilde).reshape(N_,1)
+        nonlinear_field_approx = nl_calc(field)
+        return np.matmul(self.varP,nonlinear_field_approx)
+
+    def pod_deim_rhs(self,state):
+        '''
+        Calculate the rhs of the POD GP implementation
+        '''
+        linear_term = self.linear_operator(state)
+        non_linear_term = self.nonlinear_operator_pod_deim(state)
+    
+        return np.add(linear_term,-non_linear_term)
+
+    def pod_deim_evolve(self):
+        '''
+        Use RK3 to do a system evolution for pod_deim
+        '''
+        # Setup fixed operations
+        self.linear_operator_fixed()
+        self.deim_matrices_precompute()
+        state = np.copy(self.state_tracker[:,0])
+        
+        # Recording the nonlinear term
+        non_linear_term = self.nonlinear_operator_pod_deim(state)
+        self.nl_state_tracker[:,0] = non_linear_term[:,0]
+        
+        for t in range(1,self.num_steps+1):
+            
+            rhs = self.pod_deim_rhs(state)
+            l1 = state + dt*rhs[:,0]
+
+            rhs = self.pod_deim_rhs(l1)
+            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
+
+            rhs = self.pod_deim_rhs(l2)
+            state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+
+            self.state_tracker[:,t] = state[:]
+
+            # Recording the nonlinear term
+            non_linear_term = self.nonlinear_operator_pod_deim(state)
+            self.nl_state_tracker[:,t] = non_linear_term[:,0]
+
+
+
+
+
+            
+            
+        
         
 
 
@@ -423,24 +514,17 @@ class gp_evolution(flax.struct.PyTreeNode):
 
 class MLP(nn.Module):
     # spatial_resolution : 128
-    spatial_resolution : 1536
+    spatial_resolution : 3072
     
     @nn.compact
     def __call__(self, x):
-        ###---------------CNN --------------------
-        # x = nn.Dense(features = 200)(x)
-        # x = nn.gelu(x)
-        # x = nn.Dense(features = 200)(x)
-        # x = nn.gelu(x)
+        x = nn.Dense(features = 200)(x)
+        x = nn.tanh(x)
+        x = nn.Dense(500)(x)
+        x = nn.tanh(x)
         x = nn.Dense(self.spatial_resolution)(x)
-        x = x.reshape((128,12))
-        # x = nn.sigmoid(x) * 128
-        # x = jnp.array(x, dtype=jnp.int32)
-        # sort = jax.tree_map(lambda x:jnp.argsort(x, descending=True)[:k_sampling])
-        # sort = jnp.argsort(x, descending=True)
-        # k_index = sort[:k_sampling]
-        # x = nn.gelu(x) # relu(x) #
-        # x = nn.Conv(features=self.latent_dim, padding='CIRCULAR', kernel_size=(3, 3, 3))(x) #4, 4, 32 ---> 4, 4, 40
+        x = x.reshape((128,24))
+        x = nn.softmax(x/0.025, axis=0)
         return x
     
 
