@@ -16,10 +16,10 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
     V : jnp.array
     U : jnp.array
     P : jnp.array
-    num_steps : int
+    # num_steps : int
     model : nn.Module
     sampling_factor : int
-    train : bool
+    # train : bool
     
     def init_params(self):
         return self.model.init(jax.random.PRNGKey(0),jnp.zeros((128)))
@@ -76,15 +76,18 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
         Precompute the DEIM matrices for nonlinear term in ODE
         '''
         # np.save('P.npy',self.P)
+        
+        k_index = jnp.argmax(self.P, axis=0) 
+        
         mtemp = np.linalg.pinv(np.matmul(np.transpose(self.P),self.U)) #ok MxM
         mtemp = np.matmul(self.U,mtemp) # NxM
         mtemp = np.matmul(mtemp,np.transpose(self.P)) # NxN
         
         varP = np.matmul(np.transpose(self.V),mtemp) # KxN
         
-        return varP
+        return k_index, varP
         
-    def deim_matrices_MLsampling(self, ytilde, params):
+    def deim_matrices_MLsampling(self, ytilde, params, train):
         '''
         Select sampling points for non-linear term calculations: two options
         
@@ -117,15 +120,16 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
         
         k_index = jnp.argmax(P_ML, axis=0)
         
-        if self.train == False:
+        if train == False:
         
-            result = np.zeros_like(P_ML)
-            max_indices = np.argmax(P_ML, axis=0)
-            result[max_indices, np.arange(P_ML.shape[1])] = 1
+            result = jnp.zeros_like(P_ML)
+            max_indices = jnp.argmax(P_ML, axis=0)
+            result = result.at[max_indices, jnp.arange(P_ML.shape[1])].set(1)
             P_ML = result
-            k_index = jnp.argmax(P_ML, axis=0)          
-            
-            # P_ML=self.P
+            k_index = jnp.argmax(P_ML, axis=0)
+            # P_ML = self.P
+            # k_index = jnp.argmax(P_ML, axis=0)
+            print(k_index)
             
             
         
@@ -198,39 +202,43 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
         return jnp.add(linear_term,-non_linear_term)
         
 
-    def pod_deim_ML_evolve(self, params, ytilde_init):
+    def pod_deim_ML_evolve(self, params, ytilde_init, train, num_steps):
         '''
         Use RK3 to do a system evolution for pod_deim
         '''
+        # self.train = train
+        # if num_steps is not None:
+        #     self.num_steps = num_steps
         
-        state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
+        state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps),dtype='double')
         state_tracker = state_tracker.at[:, 0].set(ytilde_init)
-        nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
-        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),self.num_steps),dtype='int')
-        #k_index_tracker = jnp.zeros(shape=(128,self.num_steps),dtype='int')
+        nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps),dtype='double')
+        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),num_steps),dtype='int')
+
         
 
         # Setup fixed operations
         linear_matrix = self.linear_operator_fixed()
         state = state_tracker[:,0]
         
-        k_index, varP = self.deim_matrices_MLsampling(state, params)
+        k_index, varP = self.deim_matrices_MLsampling(state, params, train)
+        # k_index, varP = self.deim_matrices_precompute()
         # Recording the nonlinear term
         non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
-        #self.nl_state_tracker[:,0] = non_linear_term[:,0]
         nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
         k_index_tracker=k_index_tracker.at[:,0].set(k_index)
         
         
-        for t in range(1,self.num_steps+1):
+        for t in range(1,num_steps):
+            #Strong Stability Preserving Runge-Kutta 
             rhs = self.pod_deim_rhs_MLsampling(state, linear_matrix, varP)
             l1 = state + dt*rhs[:,0]
 
-            k_index, varP = self.deim_matrices_MLsampling(l1, params)
+            k_index, varP = self.deim_matrices_MLsampling(l1, params, train)
             rhs = self.pod_deim_rhs_MLsampling(l1, linear_matrix, varP)
             l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
 
-            k_index, varP = self.deim_matrices_MLsampling(l2, params)
+            k_index, varP = self.deim_matrices_MLsampling(l2, params, train)
             rhs = self.pod_deim_rhs_MLsampling(l2, linear_matrix, varP)
             #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
             state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
@@ -239,69 +247,70 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
             
 
             # Recording the nonlinear term
-            k_index, varP = self.deim_matrices_MLsampling(state, params)
+            k_index, varP = self.deim_matrices_MLsampling(state, params, train)
             #print(k_index)
             
             non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
             nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
             
             k_index_tracker=k_index_tracker.at[:,t].set(k_index)
+        
             
         return state_tracker, k_index_tracker
     
     
     
-    def pod_deim_ML_evolve_fixed(self, params, ytilde_init):
-        '''
-        Use RK3 to do a system evolution for pod_deim
-        '''
+    # def pod_deim_ML_evolve_fixed(self, params, ytilde_init):
+    #     '''
+    #     Use RK3 to do a system evolution for pod_deim
+    #     '''
         
-        state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
-        state_tracker = state_tracker.at[:, 0].set(ytilde_init)
-        nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
-        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),self.num_steps),dtype='int')
-        #k_index_tracker = jnp.zeros(shape=(128,self.num_steps),dtype='int')
+    #     state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
+    #     state_tracker = state_tracker.at[:, 0].set(ytilde_init)
+    #     nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],self.num_steps),dtype='double')
+    #     k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),self.num_steps),dtype='int')
+    #     #k_index_tracker = jnp.zeros(shape=(128,self.num_steps),dtype='int')
         
 
-        # Setup fixed operations
-        linear_matrix = self.linear_operator_fixed()
-        self.deim_matrices_precompute()
-        state = state_tracker[:,0]
+    #     # Setup fixed operations
+    #     linear_matrix = self.linear_operator_fixed()
+    #     self.deim_matrices_precompute()
+    #     state = state_tracker[:,0]
         
-        k_index, varP = self.deim_matrices_MLsampling(state, params)
-        # Recording the nonlinear term
-        non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
-        #self.nl_state_tracker[:,0] = non_linear_term[:,0]
-        nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
-        k_index_tracker=k_index_tracker.at[:,0].set(k_index)
+    #     k_index, varP = self.deim_matrices_MLsampling(state, params)
+    #     # Recording the nonlinear term
+    #     non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
+    #     #self.nl_state_tracker[:,0] = non_linear_term[:,0]
+    #     nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
+    #     k_index_tracker=k_index_tracker.at[:,0].set(k_index)
         
         
-        for t in range(1,self.num_steps+1):
-            rhs = self.pod_deim_rhs_MLsampling(state, linear_matrix, varP)
-            l1 = state + dt*rhs[:,0]
+    #     for t in range(1,self.num_steps+1):
+    #         rhs = self.pod_deim_rhs_MLsampling(state, linear_matrix, varP)
+    #         l1 = state + dt*rhs[:,0]
 
-            k_index, varP = self.deim_matrices_MLsampling(l1, params)
-            rhs = self.pod_deim_rhs_MLsampling(l1, linear_matrix, varP)
-            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
+    #         k_index, varP = self.deim_matrices_MLsampling(l1, params)
+    #         rhs = self.pod_deim_rhs_MLsampling(l1, linear_matrix, varP)
+    #         l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
 
-            k_index, varP = self.deim_matrices_MLsampling(l2, params)
-            rhs = self.pod_deim_rhs_MLsampling(l2, linear_matrix, varP)
-            #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-            state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+    #         k_index, varP = self.deim_matrices_MLsampling(l2, params)
+    #         rhs = self.pod_deim_rhs_MLsampling(l2, linear_matrix, varP)
+    #         #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+    #         state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
 
-            state_tracker=state_tracker.at[:,t].set(state[:])
+    #         state_tracker=state_tracker.at[:,t].set(state[:])
             
 
-            # Recording the nonlinear term
-            k_index, varP = self.deim_matrices_MLsampling(state, params)
-            #print(k_index)
+    #         # Recording the nonlinear term
+    #         k_index, varP = self.deim_matrices_MLsampling(state, params)
+    #         #print(k_index)
             
-            non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
-            nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
+    #         non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
+    #         nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
             
-            k_index_tracker=k_index_tracker.at[:,t].set(k_index)
+    #         k_index_tracker=k_index_tracker.at[:,t].set(k_index)
             
-        return state_tracker, k_index_tracker
+    #     return state_tracker, k_index_tracker
             
             
 
@@ -518,10 +527,10 @@ class MLP(nn.Module):
     
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(features = 200)(x)
+        x = nn.Dense(features = 1000)(x)
         x = nn.tanh(x)
-        x = nn.Dense(500)(x)
-        x = nn.tanh(x)
+        x = nn.Dense(1000)(x)
+        x = nn.relu(x)
         x = nn.Dense(self.spatial_resolution)(x)
         x = x.reshape((128,24))
         x = nn.softmax(x/0.025, axis=0)

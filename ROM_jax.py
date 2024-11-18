@@ -30,7 +30,10 @@ from GP_jax import gp_evolution, MLP, gp_evolution_ML
 
     
     
-def Dataloader(data,batch_size,batch_time):
+def Dataloader(data,batch_size,batch_time,seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+    
     time_chunks = []
     for i in range(data.shape[1] - batch_time):
         time_chunks.append(data[:,i:i+batch_time])
@@ -50,7 +53,7 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
 
 
     def loss(params,batch):
-            preds, _=gp_rom_train.pod_deim_ML_evolve(params, batch[:, 0])
+            preds, _=gp_rom_train.pod_deim_ML_evolve(params, batch[:, 0], train=True, num_steps=batch.shape[1])
 
             L = jnp.mean((jnp.abs(preds[:,1:] - batch[:,1:])))
             #L = jnp.mean((jnp.square(preds[:,1:] - batch[:,1:])))
@@ -60,6 +63,14 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
 
     vloss =  lambda params,batch :jnp.mean(jax.vmap(loss,in_axes=(None,0))(params,batch))
     
+    
+    def validation_loss(params, test_data):
+        test_data = test_data[:,:int(test_data.shape[1]/2)]
+        preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
+        L = jnp.mean((jnp.abs(preds[:,1:] - test_data[:,1:])))
+        
+        return L
+
     
     @jax.jit
     def step(params, opt_state, batch):
@@ -71,7 +82,7 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
     
     with open(f"{name}.csv", "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["Epoch", "Loss"]) 
+        writer.writerow(["Epoch", "Loss", "Val_Loss"]) 
         for i in range(1,epochs+1): #tqdm(range(epochs)):#
             losses = []
             for batch in train_data: # train_data:#
@@ -79,8 +90,9 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
                 losses.append(loss_value)
             net_loss = np.mean(np.array(losses))
             pickle.dump(params,open(f'params/{name}','wb'))
-            print(f'epochs={i}, net_loss={net_loss}')
-            writer.writerow([i, net_loss])
+            val_loss = validation_loss(params, test_data)
+            print(f'epochs={i}, net_loss={net_loss}, val_loss={val_loss}')
+            writer.writerow([i, net_loss, val_loss])
             #test_loss = vloss(params,test_data[np.random.randint(len(test_data))])
             #print(f'net_loss: {net_loss}, test_loss: {test_loss}')
             #if test_loss < best_loss:
@@ -105,7 +117,7 @@ if __name__ == "__main__":
     V, Ytilde = field_compression(Ytot,K) # K is the number of retained POD bases for field (and also dimension of reduced space)
     U, Ftilde_exact, P = nonlinear_compression(V,Ftot,M) # M is the number of retained POD basis for nonlinear term
 
-    print(U.shape)
+    # print(U.shape)
     
     indices = np.zeros((P.shape[1]), dtype=int)
 
@@ -134,20 +146,20 @@ if __name__ == "__main__":
     
     
     batch_size = 16
-    batch_time = 2
+    batch_time = 4
     lr = 1e-5
-    train_data = Dataloader(Ytilde, batch_size, batch_time)
+    train_data = Dataloader(Ytilde, batch_size, batch_time, seed = 42)
     
-    num_steps = batch_time    
-    state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps+1),dtype='double')
-    state_tracker = state_tracker.at[:, 0].set(ytilde_init[:, 0])
-    nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps+1),dtype='double')
+    # num_steps = batch_time    
+    # state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps+1),dtype='double')
+    # state_tracker = state_tracker.at[:, 0].set(ytilde_init[:, 0])
+    # nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps+1),dtype='double')
       
       
     name = f'batchtime_{batch_time}_lr_{lr:.1e}'
-    
-    gp_rom_ml_train = gp_evolution_ML(V,U,P,batch_time, model, sampling_factor, train=True)
-    Train(model, gp_rom_ml_train, train_data, train_data, lr=lr, epochs=2500, name=name)
+    print(jnp.linalg.norm(P))
+    gp_rom_ml_train = gp_evolution_ML(V,U,P, model, sampling_factor)
+    Train(model, gp_rom_ml_train, train_data, Ytilde, lr=lr, epochs=3000, name=name)
     
     
     # model = MLP(3072)
@@ -166,4 +178,8 @@ if __name__ == "__main__":
     
     
     
+
+
+
+
 
