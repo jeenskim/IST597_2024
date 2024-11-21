@@ -44,9 +44,11 @@ def Dataloader(data,batch_size,batch_time,seed=None):
     return split
 
 
-def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
+def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try', params=None):
     
-    params = gp_rom_train.init_params()
+    if params == None:
+        params = gp_rom_train.init_params()
+        
 
     optimizer = optax.adam(learning_rate = lr)
     opt_state = optimizer.init(params)
@@ -65,7 +67,7 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
     
     
     def validation_loss(params, test_data):
-        test_data = test_data[:,:int(test_data.shape[1]/2)]
+        test_data = test_data[:,:int(test_data.shape[1])]
         preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
         L = jnp.mean((jnp.abs(preds[:,1:] - test_data[:,1:])))
         
@@ -84,13 +86,16 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
         writer = csv.writer(csvfile)
         writer.writerow(["Epoch", "Loss", "Val_Loss"]) 
         for i in range(1,epochs+1): #tqdm(range(epochs)):#
+            val_loss = 1e5
             losses = []
             for batch in train_data: # train_data:#
                 params, opt_state, loss_value, grads = step(params,opt_state,batch)
                 losses.append(loss_value)
             net_loss = np.mean(np.array(losses))
-            pickle.dump(params,open(f'params/{name}','wb'))
-            val_loss = validation_loss(params, test_data)
+            v_loss = validation_loss(params, test_data)
+            if v_loss<val_loss:
+                val_loss = v_loss
+                pickle.dump(params,open(f'params/{name}','wb'))
             print(f'epochs={i}, net_loss={net_loss}, val_loss={val_loss}')
             writer.writerow([i, net_loss, val_loss])
             #test_loss = vloss(params,test_data[np.random.randint(len(test_data))])
@@ -117,7 +122,7 @@ if __name__ == "__main__":
     V, Ytilde = field_compression(Ytot,K) # K is the number of retained POD bases for field (and also dimension of reduced space)
     U, Ftilde_exact, P = nonlinear_compression(V,Ftot,M) # M is the number of retained POD basis for nonlinear term
 
-    # print(U.shape)
+    print(U.shape)
     
     indices = np.zeros((P.shape[1]), dtype=int)
 
@@ -140,13 +145,13 @@ if __name__ == "__main__":
     
     
     # ROM assessments - DEIM-ML
-    model = MLP(3072)
+    model = MLP(1536)
     sampling_factor = U.shape[1]
 
     
     
     batch_size = 16
-    batch_time = 4
+    batch_time = 10
     lr = 1e-5
     train_data = Dataloader(Ytilde, batch_size, batch_time, seed = 42)
     
@@ -157,15 +162,18 @@ if __name__ == "__main__":
       
       
     name = f'batchtime_{batch_time}_lr_{lr:.1e}'
-    print(jnp.linalg.norm(P))
-    gp_rom_ml_train = gp_evolution_ML(V,U,P, model, sampling_factor)
-    Train(model, gp_rom_ml_train, train_data, Ytilde, lr=lr, epochs=3000, name=name)
-    
-    
-    # model = MLP(3072)
+    params = None
     # params = pickle.load(open(f'params/{name}','rb'))
-    # gp_rom_ml_test = gp_evolution_ML(V,U,P,1000, model, sampling_factor, train=False)
-    # Ytilde_pod_deim_ML, sampling_index   = gp_rom_ml_test.pod_deim_ML_evolve(params, ytilde_init[:, 0])
+    # params = pickle.load(open(f'params/batchtime_4_lr_1.0e-05','rb'))
+    # print(jnp.linalg.norm(P))
+    # gp_rom_ml_train = gp_evolution_ML(V,U,P, model, sampling_factor)
+    # Train(model, gp_rom_ml_train, train_data, Ytilde, lr=lr, epochs=3000, name=name, params = params)
+    
+    
+    # model = MLP(1536)
+    # params = pickle.load(open(f'params/{name}','rb'))
+    # gp_rom_ml_test = gp_evolution_ML(V,U,P, model, sampling_factor)
+    # Ytilde_pod_deim_ML, sampling_index   = gp_rom_ml_test.pod_deim_ML_evolve(params, ytilde_init[:, 0], train=False, num_steps=1000)
     
 
     # np.save(f'sampling_index_DEIM_ML_{name}.npy', sampling_index)
