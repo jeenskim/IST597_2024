@@ -27,9 +27,6 @@ from GP_jax_2 import gp_evolution, MLP, gp_evolution_ML, MLP2
 
 
 
-
-    
-    
 def Dataloader(data,batch_size,batch_time,seed=None):
     if seed is not None:
         np.random.seed(seed)
