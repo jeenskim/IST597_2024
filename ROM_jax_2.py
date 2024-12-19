@@ -51,35 +51,107 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
     # optimizer = optax.adam(learning_rate = lr)
     # opt_state = optimizer.init(params)
 
+    # optimizer = optax.chain(
+    #     optax.clip_by_global_norm(1.0),  # Add gradient clipping
+    #     optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
+    #     optax.scale(-lr)
+    # )
     optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),  # Add gradient clipping
-        optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
-        optax.scale(-lr)
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(
+            learning_rate=optax.exponential_decay(
+                init_value=lr,
+                transition_steps=100,
+                decay_rate=0.99
+            ),
+            b1=0.9,
+            b2=0.999,
+            eps=1e-8,
+            weight_decay=1e-4
+        )
     )
     opt_state = optimizer.init(params)
 
 
-    def loss(params,batch):
-            preds, _=gp_rom_train.pod_deim_ML_evolve(params, batch[:, 0], train=True, num_steps=batch.shape[1])
+    # def loss(params,batch):
+    #         preds, _=gp_rom_train.pod_deim_ML_evolve(params, batch[:, 0], train=True, num_steps=batch.shape[1])
+    #
+    #         # print("Train:", jnp.unique(preds, return_counts=True))
+    #
+    #         L = jnp.mean((jnp.abs(preds[:,1:] - batch[:,1:]))) # * 10
+    #         # L = jnp.mean((jnp.square(preds[:,1:] - batch[:,1:])))
+    #
+    #         return L
 
-            # print("Train:", jnp.unique(preds, return_counts=True))
+    def frequency_loss(predictions, targets):
+        pred_fft = jnp.fft.fft(predictions)
+        target_fft = jnp.fft.fft(targets)
 
-            L = jnp.mean((jnp.abs(preds[:,1:] - batch[:,1:]))) # * 10
-            # L = jnp.mean((jnp.square(preds[:,1:] - batch[:,1:])))
+        return jnp.mean(jnp.abs(pred_fft - target_fft))
 
-            return L
+    def loss(params, batch):
+        preds, _, l1_penalty = gp_rom_train.pod_deim_ML_evolve(
+            params, batch[:, 0], train=True, num_steps=batch.shape[1]
+        )
+
+        recon_loss = jnp.mean(jnp.abs(preds[:, 1:] - batch[:, 1:]))
+        freq_loss = frequency_loss(preds[:, 1:], batch[:, 1:])
+
+        # total_loss = recon_loss + 0.01 * freq_loss + 0.2 * l1_penalty
+        total_loss = recon_loss + 0.01 * freq_loss + 0.2 * l1_penalty
+        return total_loss
+
+    # def loss(params, batch):
+    #     preds, _, l1_penalty = gp_rom_train.pod_deim_ML_evolve(
+    #         params, batch[:, 0], train=True, num_steps=batch.shape[1]
+    #     )
+    #
+    #     recon_loss = jnp.mean(jnp.abs(preds[:, 1:] - batch[:, 1:]))
+    #
+    #     total_loss = recon_loss + 0.01 * l1_penalty
+    #
+    #     return total_loss
+
 
     vloss =  lambda params,batch :jnp.mean(jax.vmap(loss,in_axes=(None,0))(params,batch))
     
-    def validation_loss(params, test_data):
-        test_data = test_data[:,:int(test_data.shape[1]/2)]
-        preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
-        # print("Val:", jnp.unique(preds, return_counts=True))
-        L = jnp.mean((jnp.abs(preds[:,1:] - test_data[:,1:])))
+    # def validation_loss(params, test_data):
+    #     test_data = test_data[:,:int(test_data.shape[1]/2)]
+    #     preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
+    #     # print("Val:", jnp.unique(preds, return_counts=True))
+    #     L = jnp.mean((jnp.abs(preds[:,1:] - test_data[:,1:])))
+    #
+    #     # L = jnp.mean((jnp.square(preds[:, 1:] - test_data[:, 1:])))
+    #
+    #     return L
 
-        # L = jnp.mean((jnp.square(preds[:, 1:] - test_data[:, 1:])))
-        
-        return L
+    # def validation_loss(params, test_data):
+    #     preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
+    #     L = jnp.mean((jnp.abs(preds[:, 1:] - test_data[:, 1:])))
+    #
+    #     return L
+
+    def validation_loss(params, test_data):
+        # Take first half of test data as mentioned in original code
+        # test_data = test_data[:, :int(test_data.shape[1] / 2)]
+
+        # Get predictions and l1 penalty
+        preds, _, l1_penalty = gp_rom_train.pod_deim_ML_evolve(
+            params,
+            test_data[:, 0],
+            train=False,
+            num_steps=test_data.shape[1]
+        )
+
+        # Calculate reconstruction loss
+        recon_loss = jnp.mean(jnp.abs(preds[:, 1:] - test_data[:, 1:]))
+
+        # Add regularization terms with same weights as training
+        total_loss = recon_loss + 0.01 * l1_penalty
+
+        return total_loss
+
+    # You'll also need to update the training loop to print both components:
 
     
     # @jax.jit
@@ -137,11 +209,48 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss_value, grads, grad_norm, has_nan
 
+    # with open(f"{name}.csv", "w", newline="") as csvfile:
+    #     writer = csv.writer(csvfile)
+    #     writer.writerow(["Epoch", "Loss", "Val_Loss", "Val_Recon_Loss", "Val_L1", "Grad_Norm"])
+    #     best_loss = float('inf')
+    #
+    #     for i in range(1, epochs + 1):
+    #         losses = []
+    #         grad_norms = []
+    #         for batch in train_data:
+    #             params, opt_state, loss_value, grads, grad_norm, has_nan = step(params, opt_state, batch)
+    #             losses.append(loss_value)
+    #             grad_norms.append(grad_norm)
+    #
+    #         net_loss = np.mean(np.array(losses))
+    #         mean_grad_norm = np.mean(np.array(grad_norms))
+    #
+    #         # Get validation metrics
+    #         test_preds, _, val_l1_penalty = gp_rom_train.pod_deim_ML_evolve(
+    #             params,
+    #             test_data[:, :int(test_data.shape[1] / 2)][:, 0],
+    #             train=False,
+    #             num_steps=int(test_data.shape[1] / 2)
+    #         )
+    #         val_recon_loss = jnp.mean(
+    #             jnp.abs(test_preds[:, 1:] - test_data[:, :int(test_data.shape[1] / 2)][:, 1:]))
+    #         val_loss = val_recon_loss + 0.01 * val_l1_penalty
+    #
+    #         if val_loss < best_loss:
+    #             best_loss = val_loss
+    #             print(f'Saving model... Val recon loss: {val_recon_loss:.4f}, Val L1: {val_l1_penalty:.4f}')
+    #             pickle.dump(params, open(f'params/{name}_epoch_{i}_{best_loss:.4f}', 'wb'))
+    #
+    #         print(f'epochs={i}, net_loss={net_loss:.4f}, val_loss={val_loss:.4f}, '
+    #               f'val_recon={val_recon_loss:.4f}, val_l1={val_l1_penalty:.4f}, grad_norm={mean_grad_norm:.4f}')
+    #
+    #         writer.writerow([i, net_loss, val_loss, val_recon_loss, val_l1_penalty, mean_grad_norm])
+
     # Modified training loop
     with open(f"{name}.csv", "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Epoch", "Loss", "Val_Loss", "Grad_Norm"])
-        best_loss = 0.0027  # np.inf
+        best_loss = np.inf
         for i in range(1, epochs + 1):
             losses = []
             grad_norms = []
@@ -161,7 +270,7 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
             if val_loss < best_loss:
                 best_loss = val_loss
                 print('Saving model...')
-                pickle.dump(params, open(f'params/{name}_epoch_{i}_{best_loss:.4f}', 'wb'))
+                pickle.dump(params, open(f'params/{name}_re_1000_epoch_{i}_{best_loss:.4f}', 'wb'))
 
             print(f'epochs={i}, net_loss={net_loss}, val_loss={val_loss}, grad_norm={mean_grad_norm}')
             writer.writerow([i, net_loss, val_loss, mean_grad_norm])
@@ -185,7 +294,7 @@ if __name__ == "__main__":
     V, Ytilde = field_compression(Ytot,K) # K is the number of retained POD bases for field (and also dimension of reduced space)
     U, Ftilde_exact, P = nonlinear_compression(V,Ftot,M) # M is the number of retained POD basis for nonlinear term
 
-    # print(U.shape)
+    print(U.shape, V.shape, Ytilde.shape, Ftilde_exact.shape, P.shape, np.unique(P))
     
     indices = np.zeros((P.shape[1]), dtype=int)
 
@@ -213,7 +322,7 @@ if __name__ == "__main__":
 
     batch_size = 16
     batch_time = 4
-    lr = 1e-5
+    lr = 1e-3
 
     train_data = Dataloader(Ytilde, batch_size, batch_time, seed = 42)
     

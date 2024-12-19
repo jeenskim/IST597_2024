@@ -3,13 +3,13 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import os
 
-root = "/Users/ibk5106/Desktop/IST_courses/fall_2024/IST_597_002/codes/IST597_2024"
+root = "/Users/ibk5106/Desktop/IST_courses/fall_2024/IST_597_002/IST597_2024"
 
 data_DEIM = np.load(os.path.join(root, 'POD_DEIM.npy'))
 data_true = np.load(os.path.join(root, 'POD_True_.npy'))
 sampling_index_DEIM = np.load(os.path.join(root, 'sampling_index_DEIM.npy'))
 
-param = 'current_best_m_24_wo_discrete_mlp2_batch_4_lr_1.0e-05_epoch_2514_0.0008302'
+param = 'batchtime_4_lr_1.0e-03_re_1000_epoch_28_0.0190'
 data_DEIM_ML = np.load(os.path.join(root, f'POD_DEIM_ML_{param}.npy'))
 sampling_index_DEIM_ML = np.load(os.path.join(root, f'sampling_index_DEIM_ML_{param}.npy'))
 print(sampling_index_DEIM_ML.shape)

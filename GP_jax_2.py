@@ -77,7 +77,7 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
         '''
         # np.save('P.npy',self.P)
         
-        k_index = jnp.argmax(self.P, axis=0) 
+        k_index = jnp.argmax(self.P, axis=0)
         
         mtemp = np.linalg.pinv(np.matmul(np.transpose(self.P),self.U)) #ok MxM
         mtemp = np.matmul(self.U,mtemp) # NxM
@@ -86,96 +86,124 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
         varP = np.matmul(np.transpose(self.V),mtemp) # KxN
         
         return k_index, varP
-        
+
+    def straight_through_sampling(self, logits, train=True, hard_threshold=0.9):
+        probs = jnn.softmax(logits, axis=0)
+
+        if not train:
+            # print("validating...")
+            result = jnp.zeros_like(probs)
+            max_indices = jnp.argmax(probs, axis=0)
+            return result.at[max_indices, jnp.arange(probs.shape[1])].set(1), 0.0
+
+        sample = probs
+
+        l1_penalty = 0.01 * jnp.sum(jnp.abs(probs))
+
+        return sample, l1_penalty
+
     def deim_matrices_MLsampling(self, ytilde, params, train):
-        '''
-        Select sampling points for non-linear term calculations: two options
-        
-        1. Global Operation(using MLP)
-        * Input: state variable at all points - shape: Nx1 / Output: Characteristic variable field - shape: Nx1
-        * Sort by descending order to truncate by Kx1 : sampling points
-        
-        2. Node-wise Operation (using projection vector-Shivam's Top-K)
-        * X: state variable - shape: NxNf / p: projection vector - shape: Nfx1 / y: projected field -shape: Nx1
-        * Multiply p to each point to get y -> sort by descending order to truncate by Kx1 : sampling points
-        '''
         N_ = jnp.shape(self.V)[0]
-        field = jnp.matmul(self.V, ytilde).reshape(N_,1)
-        
-        # Numer of sampling point    
-        #k_sampling=int(N_/self.sampling_factor)
-        
-        #calculate characteristic variable field using MLP
-        #print(field.shape)
-        #y=self.model.apply(params, field[:,0])
-        # k_index=self.model.apply(params, field[:,0])
-        # print(k_index.shape)
+        field = jnp.matmul(self.V, ytilde).reshape(N_, 1)
 
         key = jax.random.PRNGKey(seed=42)
-        P_ML = self.model.apply(params, field[:,0], training=True, rngs={'dropout': key})
-        # jax.debug.print("{}, {}",jnp.max(P_ML), jnp.min(P_ML))
+        logits = self.model.apply(params, field[:, 0], training=train, rngs={'dropout': key})
 
+        P_ML, l1_penalty = self.straight_through_sampling(logits, train=train)
         k_index = jnp.argmax(P_ML, axis=0)
-        
-        # if train == False:
-        #     result = jnp.zeros_like(P_ML)
-        #     max_indices = jnp.argmax(P_ML, axis=0)
-        #     result = result.at[max_indices, jnp.arange(P_ML.shape[1])].set(1)
-        #     P_ML = result
-        #     k_index = jnp.argmax(P_ML, axis=0)
-            # jax.debug.print("{}, {}", jnp.max(P_ML), jnp.min(P_ML))
-            # P_ML = self.P
-            # k_index = jnp.argmax(P_ML, axis=0)
-            # print(k_index)
 
-        # jax.debug.print("{}, {}",jnp.max(k_index), jnp.min(k_index))
-        
-        # P_ML=self.P
-        
-        # np.save('P_ML.npy',P_ML)
-        #exit()
-        
-                    
-        #print(jnp.average(P_ML, axis=0))
-        
-        #jax.debug.print("{}",P_ML[:,0])
-        #P_ML = jax.where()
+        mtemp = jnp.linalg.pinv(jnp.matmul(jnp.transpose(P_ML), self.U))
+        mtemp = jnp.matmul(self.U, mtemp)
+        mtemp = jnp.matmul(mtemp, jnp.transpose(P_ML))
+        varP = jnp.matmul(jnp.transpose(self.V), mtemp)
 
-        # print(k_index)
-        #y_minus=jnp.array(-y, dtype=np.float64)
-        #print(y)
-        # print(k_index.shape)
-        # print(k_sampling)
+        return k_index, varP, l1_penalty
         
-        #sorting y by descending order to truncate by Kx1 & making k_index vector - shape: Kx1
-        #k_index=jnp.argsort(y_minus)[:k_sampling]
-        
-        #build P matrix using k_index
-        # P_ML=jnp.ones((N_, k_sampling)) * k_index[0]
-        
-        # for j in range(k_sampling):
-        #     i=k_index[j]
-        #     #self.P[i][j]=1
-        #     P_ML=P_ML.at[i,j].set(1)
-            
-        # print(P_ML.shape)
-            
-        #P_ML=jnp.ones((N_, k_sampling)) *y[0]
-        # P_ML=jnp.ones((N_, k_sampling)) *y[k_index][3]
-        # P_ML=jnp.ones((N_, k_sampling)) * k_index[1]
-        #print(P_ML)
-        
-        mtemp = jnp.linalg.pinv(jnp.matmul(jnp.transpose(P_ML),self.U)) #ok MxM
-        mtemp = jnp.matmul(self.U,mtemp) # NxM
-        mtemp = jnp.matmul(mtemp,jnp.transpose(P_ML)) # NxN
-        
-        
-        varP = jnp.matmul(jnp.transpose(self.V),mtemp) # KxN
-        
-        
-        
-        
-        return k_index, varP
+    # def deim_matrices_MLsampling(self, ytilde, params, train):
+    #     '''
+    #     Select sampling points for non-linear term calculations: two options
+    #
+    #     1. Global Operation(using MLP)
+    #     * Input: state variable at all points - shape: Nx1 / Output: Characteristic variable field - shape: Nx1
+    #     * Sort by descending order to truncate by Kx1 : sampling points
+    #
+    #     2. Node-wise Operation (using projection vector-Shivam's Top-K)
+    #     * X: state variable - shape: NxNf / p: projection vector - shape: Nfx1 / y: projected field -shape: Nx1
+    #     * Multiply p to each point to get y -> sort by descending order to truncate by Kx1 : sampling points
+    #     '''
+    #     N_ = jnp.shape(self.V)[0]
+    #     field = jnp.matmul(self.V, ytilde).reshape(N_,1)
+    #
+    #     # Numer of sampling point
+    #     #k_sampling=int(N_/self.sampling_factor)
+    #
+    #     #calculate characteristic variable field using MLP
+    #     #print(field.shape)
+    #     #y=self.model.apply(params, field[:,0])
+    #     # k_index=self.model.apply(params, field[:,0])
+    #     # print(k_index.shape)
+    #
+    #     key = jax.random.PRNGKey(seed=42)
+    #     P_ML = self.model.apply(params, field[:,0], training=True, rngs={'dropout': key})
+    #     # jax.debug.print("{}, {}",jnp.max(P_ML), jnp.min(P_ML))
+    #
+    #     k_index = jnp.argmax(P_ML, axis=0)
+    #
+    #     if train == False:
+    #         result = jnp.zeros_like(P_ML)
+    #         max_indices = jnp.argmax(P_ML, axis=0)
+    #         result = result.at[max_indices, jnp.arange(P_ML.shape[1])].set(1)
+    #         P_ML = result
+    #         k_index = jnp.argmax(P_ML, axis=0)
+    #         # jax.debug.print("{}, {}", jnp.max(P_ML), jnp.min(P_ML))
+    #         # P_ML = self.P
+    #         # k_index = jnp.argmax(P_ML, axis=0)
+    #         # print(k_index)
+    #
+    #     # jax.debug.print("{}, {}",jnp.max(k_index), jnp.min(k_index))
+    #
+    #     # P_ML=self.P
+    #
+    #     # np.save('P_ML.npy',P_ML)
+    #     #exit()
+    #
+    #
+    #     #print(jnp.average(P_ML, axis=0))
+    #
+    #     #jax.debug.print("{}",P_ML[:,0])
+    #     #P_ML = jax.where()
+    #
+    #     # print(k_index)
+    #     #y_minus=jnp.array(-y, dtype=np.float64)
+    #     #print(y)
+    #     # print(k_index.shape)
+    #     # print(k_sampling)
+    #
+    #     #sorting y by descending order to truncate by Kx1 & making k_index vector - shape: Kx1
+    #     #k_index=jnp.argsort(y_minus)[:k_sampling]
+    #
+    #     #build P matrix using k_index
+    #     # P_ML=jnp.ones((N_, k_sampling)) * k_index[0]
+    #
+    #     # for j in range(k_sampling):
+    #     #     i=k_index[j]
+    #     #     #self.P[i][j]=1
+    #     #     P_ML=P_ML.at[i,j].set(1)
+    #
+    #     # print(P_ML.shape)
+    #
+    #     #P_ML=jnp.ones((N_, k_sampling)) *y[0]
+    #     # P_ML=jnp.ones((N_, k_sampling)) *y[k_index][3]
+    #     # P_ML=jnp.ones((N_, k_sampling)) * k_index[1]
+    #     #print(P_ML)
+    #
+    #     mtemp = jnp.linalg.pinv(jnp.matmul(jnp.transpose(P_ML),self.U)) #ok MxM
+    #     mtemp = jnp.matmul(self.U,mtemp) # NxM
+    #     mtemp = jnp.matmul(mtemp,jnp.transpose(P_ML)) # NxN
+    #
+    #     varP = jnp.matmul(jnp.transpose(self.V),mtemp) # KxN
+    #
+    #     return k_index, varP
           
 
     def nonlinear_operator_pod_deim(self, ytilde, varP):
@@ -196,63 +224,114 @@ class gp_evolution_ML(flax.struct.PyTreeNode):
         non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
     
         return jnp.add(linear_term,-non_linear_term)
-        
 
     def pod_deim_ML_evolve(self, params, ytilde_init, train, num_steps):
         '''
         Use RK3 to do a system evolution for pod_deim
         '''
-        # self.train = train
-        # if num_steps is not None:
-        #     self.num_steps = num_steps
-        
-        state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps),dtype='double')
+        state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0], num_steps), dtype='double')
         state_tracker = state_tracker.at[:, 0].set(ytilde_init)
-        nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps),dtype='double')
-        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),num_steps),dtype='int')
+        nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0], num_steps), dtype='double')
+        k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor), num_steps), dtype='int')
 
-        
+        total_l1_penalty = 0.0
 
-        # Setup fixed operations
         linear_matrix = self.linear_operator_fixed()
-        state = state_tracker[:,0]
-        
-        k_index, varP = self.deim_matrices_MLsampling(state, params, train)
-        # k_index, varP = self.deim_matrices_precompute()
-        # Recording the nonlinear term
+        state = state_tracker[:, 0]
+
+        k_index, varP, l1_penalty = self.deim_matrices_MLsampling(state, params, train)
+        total_l1_penalty += l1_penalty
+
         non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
-        nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
-        k_index_tracker=k_index_tracker.at[:,0].set(k_index)
-        
-        
-        for t in range(1,num_steps):
-            #Strong Stability Preserving Runge-Kutta 
+        nl_state_tracker = nl_state_tracker.at[:, 0].set(non_linear_term[:, 0])
+        k_index_tracker = k_index_tracker.at[:, 0].set(k_index)
+
+        for t in range(1, num_steps):
+            # Strong Stability Preserving Runge-Kutta
             rhs = self.pod_deim_rhs_MLsampling(state, linear_matrix, varP)
-            l1 = state + dt*rhs[:,0]
+            l1 = state + dt * rhs[:, 0]
 
-            k_index, varP = self.deim_matrices_MLsampling(l1, params, train)
+            k_index, varP, l1_penalty = self.deim_matrices_MLsampling(l1, params, train)
+            total_l1_penalty += l1_penalty
+
             rhs = self.pod_deim_rhs_MLsampling(l1, linear_matrix, varP)
-            l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
+            l2 = 0.75 * state + 0.25 * l1 + 0.25 * dt * rhs[:, 0]
 
-            k_index, varP = self.deim_matrices_MLsampling(l2, params, train)
+            k_index, varP, l1_penalty = self.deim_matrices_MLsampling(l2, params, train)
+            total_l1_penalty += l1_penalty
+
             rhs = self.pod_deim_rhs_MLsampling(l2, linear_matrix, varP)
-            #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
-            state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+            state = 1.0 / 3.0 * state[:] + 2.0 / 3.0 * l2[:] + 2.0 / 3.0 * dt * rhs[:, 0]
 
-            state_tracker=state_tracker.at[:,t].set(state[:])
-            
+            state_tracker = state_tracker.at[:, t].set(state[:])
 
-            # Recording the nonlinear term
-            k_index, varP = self.deim_matrices_MLsampling(state, params, train)
-            #print(k_index)
-            
+            k_index, varP, l1_penalty = self.deim_matrices_MLsampling(state, params, train)
+            total_l1_penalty += l1_penalty
+
             non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
-            nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
-            
-            k_index_tracker=k_index_tracker.at[:,t].set(k_index)
+            nl_state_tracker = nl_state_tracker.at[:, t].set(non_linear_term[:, 0])
+            k_index_tracker = k_index_tracker.at[:, t].set(k_index)
+
+        avg_l1_penalty = total_l1_penalty / (num_steps * 4)
+
+        return state_tracker, k_index_tracker, avg_l1_penalty
         
-            
-        return state_tracker, k_index_tracker
+
+    # def pod_deim_ML_evolve(self, params, ytilde_init, train, num_steps):
+    #     '''
+    #     Use RK3 to do a system evolution for pod_deim
+    #     '''
+    #     # self.train = train
+    #     # if num_steps is not None:
+    #     #     self.num_steps = num_steps
+    #
+    #     state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps),dtype='double')
+    #     state_tracker = state_tracker.at[:, 0].set(ytilde_init)
+    #     nl_state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps),dtype='double')
+    #     k_index_tracker = jnp.zeros(shape=(int(self.sampling_factor),num_steps),dtype='int')
+    #
+    #
+    #
+    #     # Setup fixed operations
+    #     linear_matrix = self.linear_operator_fixed()
+    #     state = state_tracker[:,0]
+    #
+    #     k_index, varP = self.deim_matrices_MLsampling(state, params, train)
+    #     # k_index, varP = self.deim_matrices_precompute()
+    #     # Recording the nonlinear term
+    #     non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
+    #     nl_state_tracker=nl_state_tracker.at[:,0].set(non_linear_term[:,0])
+    #     k_index_tracker=k_index_tracker.at[:,0].set(k_index)
+    #
+    #
+    #     for t in range(1,num_steps):
+    #         #Strong Stability Preserving Runge-Kutta
+    #         rhs = self.pod_deim_rhs_MLsampling(state, linear_matrix, varP)
+    #         l1 = state + dt*rhs[:,0]
+    #
+    #         k_index, varP = self.deim_matrices_MLsampling(l1, params, train)
+    #         rhs = self.pod_deim_rhs_MLsampling(l1, linear_matrix, varP)
+    #         l2 = 0.75*state + 0.25*l1 + 0.25*dt*rhs[:,0]
+    #
+    #         k_index, varP = self.deim_matrices_MLsampling(l2, params, train)
+    #         rhs = self.pod_deim_rhs_MLsampling(l2, linear_matrix, varP)
+    #         #state[:] = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+    #         state = 1.0/3.0*state[:] + 2.0/3.0*l2[:] + 2.0/3.0*dt*rhs[:,0]
+    #
+    #         state_tracker=state_tracker.at[:,t].set(state[:])
+    #
+    #
+    #         # Recording the nonlinear term
+    #         k_index, varP = self.deim_matrices_MLsampling(state, params, train)
+    #         #print(k_index)
+    #
+    #         non_linear_term = self.nonlinear_operator_pod_deim(state, varP)
+    #         nl_state_tracker=nl_state_tracker.at[:,t].set(non_linear_term[:,0])
+    #
+    #         k_index_tracker=k_index_tracker.at[:,t].set(k_index)
+    #
+    #
+    #     return state_tracker, k_index_tracker
     
     
     
@@ -534,38 +613,106 @@ class MLP(nn.Module):
         return x
 
 
+# class MLP2(nn.Module):
+#     spatial_resolution: 3072
+#     dropout_rate: float = 0.2
+#
+#     @nn.compact
+#     def __call__(self, x, training: bool = True):
+#         x = nn.Dense(1024)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         x = nn.Dense(1024)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         x = nn.Dense(2048)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         # x = nn.Dense(4096)(x)
+#         # x = nn.LayerNorm()(x)
+#         # x = nn.relu(x)
+#         # x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         x = nn.Dense(self.spatial_resolution)(x)
+#         x = x.reshape((128, self.spatial_resolution//128))
+#         # x = x/0.025
+#         # x = nn.softmax(x, axis=0)
+#         return x
+
+
 class MLP2(nn.Module):
     spatial_resolution: 3072
     dropout_rate: float = 0.2
 
     @nn.compact
     def __call__(self, x, training: bool = True):
-        # print(x.shape)
-        x = nn.Dense(1024)(x)
-        x = nn.LayerNorm()(x)
-        x = nn.relu(x)
-        x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
-
-        x = nn.Dense(1024)(x)
-        x = nn.LayerNorm()(x)
-        x = nn.relu(x)
-        x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
-
         x = nn.Dense(2048)(x)
         x = nn.LayerNorm()(x)
         x = nn.relu(x)
         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
 
-        # x = nn.Dense(4096)(x)
-        # x = nn.LayerNorm()(x)
-        # x = nn.relu(x)
-        # x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+        skip = x
+        x = nn.Dense(2048)(x)
+        x = nn.LayerNorm()(x)
+        x = nn.relu(x)
+        x = x + skip
+        x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
 
         x = nn.Dense(self.spatial_resolution)(x)
-        x = x.reshape((128, self.spatial_resolution//128))
-        # x = x/0.025
-        x = nn.softmax(x, axis=0)
+        x = x.reshape((128, self.spatial_resolution // 128))
+
+        x = nn.log_softmax(x, axis=0)
         return x
+
+
+# class MLP2(nn.Module):
+#     spatial_resolution: 3072
+#     dropout_rate: float = 0.2
+#
+#     @nn.compact
+#     def __call__(self, x, training: bool = True):
+#         x = nn.Dense(1024)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         skip = x
+#         x = nn.Dense(1024)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = x + skip
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         x = nn.Dense(2048)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         skip = x
+#         x = nn.Dense(2048)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = x + skip
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         x = nn.Dense(4096)(x)
+#         x = nn.LayerNorm()(x)
+#         x = nn.relu(x)
+#         x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+#
+#         x = nn.Dense(self.spatial_resolution)(x)
+#         x = x.reshape((128, self.spatial_resolution // 128))
+#
+#         x = nn.log_softmax(x, axis=0)
+#         return x
+
+
 
     
 

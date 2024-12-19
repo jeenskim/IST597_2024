@@ -48,11 +48,27 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
     # optimizer = optax.adam(learning_rate = lr)
     # opt_state = optimizer.init(params)
 
+    # optimizer = optax.chain(
+    #     optax.clip_by_global_norm(1.0),  # Add gradient clipping
+    #     optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
+    #     optax.scale(-lr)
+    # )
+
     optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),  # Add gradient clipping
-        optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
-        optax.scale(-lr)
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(
+            learning_rate=optax.exponential_decay(
+                init_value=lr,
+                transition_steps=100,
+                decay_rate=0.99
+            ),
+            b1=0.9,
+            b2=0.999,
+            eps=1e-8,
+            weight_decay=1e-4
+        )
     )
+
     opt_state = optimizer.init(params)
 
 
@@ -68,14 +84,21 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
 
     vloss =  lambda params,batch :jnp.mean(jax.vmap(loss,in_axes=(None,0))(params,batch))
     
-    def validation_loss(params, test_data):
-        test_data = test_data[:,:int(test_data.shape[1]/2)]
-        preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
-        # print("Val:", jnp.unique(preds, return_counts=True))
-        L = jnp.mean((jnp.abs(preds[:,1:] - test_data[:,1:])))
+    # def validation_loss(params, test_data):
+    #     test_data = test_data[:,:int(test_data.shape[1]/2)]
+    #     preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
+    #     # print("Val:", jnp.unique(preds, return_counts=True))
+    #     L = jnp.mean((jnp.abs(preds[:,1:] - test_data[:,1:])))
+    #
+    #     # L = jnp.mean((jnp.square(preds[:, 1:] - test_data[:, 1:])))
+    #
+    #     return L
 
-        # L = jnp.mean((jnp.square(preds[:, 1:] - test_data[:, 1:])))
-        
+
+    def validation_loss(params, test_data):
+        preds, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
+        L = jnp.mean((jnp.abs(preds[:, 1:] - test_data[:, 1:])))
+
         return L
 
     
@@ -163,10 +186,22 @@ def Train(model, gp_rom_train, train_data, test_data, lr, epochs, name='try'):
             print(f'epochs={i}, net_loss={net_loss}, val_loss={val_loss}, grad_norm={mean_grad_norm}')
             writer.writerow([i, net_loss, val_loss, mean_grad_norm])
 
+def calc_loss(V,U,P,gp_rom_train, params, test_data):
+    # test_data_half = test_data[:, :int(test_data.shape[1] / 2)]
+    preds, _, _ = gp_rom_train.pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
+    # print(preds.shape, test_data.shape)
+    # print("Val:", jnp.unique(preds, return_counts=True))
+    L_ml = jnp.mean((jnp.abs(preds[:, 1:] - test_data[:, 1:])))
 
+    # L = jnp.mean((jnp.square(preds[:, 1:] - test_data[:, 1:])))
+    gp_rom_ = gp_evolution(V, U, P, test_data[:, 0].reshape(np.shape(Ytilde)[0], 1))
 
-        
+    # ROM assessments - DEIM
+    gp_rom.pod_deim_evolve()
+    Ytilde_pod_deim_ = np.copy(gp_rom_.state_tracker)
+    L_deim = jnp.mean((jnp.abs(Ytilde_pod_deim_[:, 1:] - test_data[:, 1:])))
 
+    return L_ml, L_deim
 
 # This is the ROM assessment
 
@@ -190,10 +225,10 @@ if __name__ == "__main__":
         indices[col] = np.where(P[:, col] == 1)[0][0] 
     
     np.save('sampling_index_DEIM.npy',indices)
-    
-    
+
     # Initialize ROM class
     ytilde_init = Ytilde[:,0].reshape(np.shape(Ytilde)[0],1)
+    # print(ytilde_init.shape)
     gp_rom = gp_evolution(V,U,P,ytilde_init)
     
     
@@ -212,7 +247,8 @@ if __name__ == "__main__":
     batch_time = 4
     lr = 1e-5
 
-    train_data = Dataloader(Ytilde, batch_size, batch_time, seed = 42)
+    # train_data = Dataloader(Ytilde, batch_size, batch_time, seed = 42)
+    # print(train_data.shape)
     
     # num_steps = batch_time    
     # state_tracker = jnp.zeros(shape=(jnp.shape(ytilde_init)[0],num_steps+1),dtype='double')
@@ -225,13 +261,23 @@ if __name__ == "__main__":
     # Train(model, gp_rom_ml_train, train_data, Ytilde, lr=lr, epochs=3000, name=name)
         # pod_deim_ML_evolve(params, test_data[:, 0], train=False, num_steps=test_data.shape[1])
 
-    name = 'current_best_m_24_wo_discrete_mlp2_batch_4_lr_1.0e-05_epoch_2735_0.0006269'
+    name = 'batchtime_4_lr_1.0e-03_re_1000_epoch_28_0.0190'
 
     model = MLP2(3072)
     params = pickle.load(open(f'params/{name}','rb'))
     gp_rom_ml_test = gp_evolution_ML(V,U,P, model, sampling_factor)
-    Ytilde_pod_deim_ML, sampling_index   = gp_rom_ml_test.pod_deim_ML_evolve(params, ytilde_init[:, 0], train=False,
-                                                                             num_steps=1000)
+
+    loss_ml, loss_deim = calc_loss(V, U, P, gp_rom_ml_test, params, Ytilde)
+
+    print(f"ML loss: {loss_ml}, DEIM loss: {loss_deim}")
+
+    Ytilde_pod_deim_ML, sampling_index, _ = gp_rom_ml_test.pod_deim_ML_evolve(params, ytilde_init[:, 0], train=False,
+                                                                           num_steps=1000)
+
+    # ml_loss = jnp.mean((jnp.abs(Ytilde_pod_deim_ML[:, 1:] - ytilde_init[:, 1:])))
+    # deim_loss = jnp.mean((jnp.abs(Ytilde_pod_deim[:, 1:] - ytilde_init[:, 1:])))
+    #
+    # print(f"ML loss (alt): {ml_loss}, DEIM loss (alt): {deim_loss}")
 
 
     np.save(f'sampling_index_DEIM_ML_{name}.npy', sampling_index)
